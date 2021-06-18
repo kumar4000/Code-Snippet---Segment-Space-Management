@@ -4,11 +4,9 @@ COLUMN X NEW_VALUE Y
 SELECT LOWER(SYS_CONTEXT('userenv', 'instance_name')) X FROM dual;
 SET SERVEROUTPUT ON
 SET TERM ON
-SPOOL "SEGMENT_MAINTAINENCE_Setup_SC_1_&y..log"
+SPOOL "SEGMENT_MAINTAINENCE_Setup_1_&y..log"
 SET ECHO ON
 
-create bigfile tablespace SCHEMANAME_LOB datafile '+DG_DATA' size 1024M autoextend on ENCRYPTION USING 'AES256' DEFAULT STORAGE(ENCRYPT)
-/
 CREATE TABLE SCBDBA.MOVE_SEGMENTS_STG 
 (OWNER  			   VARCHAR2(128), 
  SEGMENT_NAME          VARCHAR2(128), 
@@ -809,12 +807,12 @@ END;
 /**********************************Sample call to the procedure************************/
 
 begin
-   scbdba.sp_Cleandata_log ('sp_Populate_Stg_Tbl','SCHEMANAME','8192','4','0','SCHEMANAME_DATA','SCHEMANAME_INDX','SCHEMANAME_LOB','UNUSABLE');
-   scbdba.sp_Cleandata_log ('sp_Stmt_Generate','SCHEMANAME','8192','4','0','SCHEMANAME_DATA','SCHEMANAME_INDX','SCHEMANAME_LOB','UNUSABLE');
-   scbdba.sp_Cleandata_log ('sp_Row_Enable','SCHEMANAME','8192','4','0','SCHEMANAME_DATA','SCHEMANAME_INDX','SCHEMANAME_LOB','UNUSABLE');
-   scbdba.sp_Cleandata_log ('sp_Move_Tbl','SCHEMANAME','8192','4','0','SCHEMANAME_DATA','SCHEMANAME_INDX','SCHEMANAME_LOB','UNUSABLE');
-   scbdba.sp_Cleandata_log ('sp_Row_Disable','SCHEMANAME','8192','4','0','SCHEMANAME_DATA','SCHEMANAME_INDX','SCHEMANAME_LOB','UNUSABLE');
-   scbdba.sp_Cleandata_log ('sp_Move_Lobs','SCHEMANAME','8192','4','0','SCHEMANAME_DATA','SCHEMANAME_INDX','SCHEMANAME_LOB','UNUSABLE');
-   scbdba.sp_Cleandata_log ('sp_Move_Lobs','SCHEMANAME','8192','4','0','SCHEMANAME_DATA','SCHEMANAME_INDX','SCHEMANAME_LOB','UNUSABLE');
+   scbdba.sp_Cleandata_log ('sp_Populate_Stg_Tbl','SCHEMANAME','8192','4','1073741824','SCHEMANAME_DATA','SCHEMANAME_INDX','SCHEMANAME_LOB','UNUSABLE');
+   scbdba.sp_Cleandata_log ('sp_Stmt_Generate','SCHEMANAME','8192','4','1073741824','SCHEMANAME_DATA','SCHEMANAME_INDX','SCHEMANAME_LOB','UNUSABLE');
+   scbdba.sp_Cleandata_log ('sp_Row_Enable','SCHEMANAME','8192','4','1073741824','SCHEMANAME_DATA','SCHEMANAME_INDX','SCHEMANAME_LOB','UNUSABLE');
+   scbdba.sp_Cleandata_log ('sp_Move_Tbl','SCHEMANAME','8192','4','1073741824','SCHEMANAME_DATA','SCHEMANAME_INDX','SCHEMANAME_LOB','UNUSABLE');
+   scbdba.sp_Cleandata_log ('sp_Row_Disable','SCHEMANAME','8192','4','1073741824','SCHEMANAME_DATA','SCHEMANAME_INDX','SCHEMANAME_LOB','UNUSABLE');
+   scbdba.sp_Cleandata_log ('sp_Move_Lobs','SCHEMANAME','8192','4','1073741824','SCHEMANAME_DATA','SCHEMANAME_INDX','SCHEMANAME_LOB','UNUSABLE');
+   scbdba.sp_Cleandata_log ('sp_Move_Lobs','SCHEMANAME','8192','4','1073741824','SCHEMANAME_DATA','SCHEMANAME_INDX','SCHEMANAME_LOB','UNUSABLE');
 end;
 /
