@@ -1,0 +1,820 @@
+/*************************Code Snippet for Segment space management in Oracle Database*****************/
+
+COLUMN X NEW_VALUE Y
+SELECT LOWER(SYS_CONTEXT('userenv', 'instance_name')) X FROM dual;
+SET SERVEROUTPUT ON
+SET TERM ON
+SPOOL "SEGMENT_MAINTAINENCE_Setup_SC_1_&y..log"
+SET ECHO ON
+
+create bigfile tablespace SCHEMANAME_LOB datafile '+DG_DATA' size 1024M autoextend on ENCRYPTION USING 'AES256' DEFAULT STORAGE(ENCRYPT)
+/
+CREATE TABLE SCBDBA.MOVE_SEGMENTS_STG 
+(OWNER  			   VARCHAR2(128), 
+ SEGMENT_NAME          VARCHAR2(128), 
+ SEGMENT_TYPE          VARCHAR2(18),
+ STATUS				   VARCHAR2(1),
+ INDX_STATUS           VARCHAR2(1),
+ ERR_MSG 			   VARCHAR2(4000),
+ STMT				   VARCHAR2(4000),
+ CREATED_DATE  		   DATE
+) TABLESPACE SCHEMANAME_DATA
+/
+
+CREATE TABLE SCBDBA.MOVE_SEG_SPACE_ERR
+(
+  PROC_NAME		 VARCHAR2(100),
+  ERR_MSG	     VARCHAR2(4000)
+) TABLESPACE SCHEMANAME_DATA
+/
+
+CREATE TABLE SCBDBA.PROC_START_END_TBL
+(
+	RUN_ID		NUMBER,
+	PROC_NAME	VARCHAR2(100),
+	START_TIME	DATE,
+	END_TIME    DATE
+) TABLESPACE SCHEMANAME_DATA
+/
+
+CREATE SEQUENCE scbdba.RUN_ID_SEQ START WITH 1 INCREMENT BY 1
+/
+
+grant select any dictionary to scbdba
+/
+
+CREATE OR REPLACE PACKAGE SCBDBA.pkg_Segment_Space_Cleanup 
+ AS
+/******************************************************************************
+   NAME:       pkg_Segment_Space_Cleanup
+   PURPOSE:
+
+   REVISIONS:
+   Ver        Date        Author           Description
+   ---------  ----------  ---------------  ------------------------------------
+   1.0        9/03/2020    KVISHWAN      1. Created this package.
+******************************************************************************/
+
+  PROCEDURE sp_Populate_Stg_Tbl (p_Block_Size NUMBER, p_File_Id NUMBER, p_Resize_Size NUMBER);
+  
+  PROCEDURE sp_Stmt_Generate (p_tbl_tblspace VARCHAR2, p_indx_tblspace VARCHAR2,p_lob_tblspace VARCHAR2);
+  
+  PROCEDURE sp_Row_Enable;
+  
+  PROCEDURE sp_Row_Disable;
+	  
+  PROCEDURE sp_Move_Tbl(p_index_tblspace VARCHAR2, p_index_status VARCHAR2);
+  
+  PROCEDURE sp_Rebuild_Indexes;
+  
+  PROCEDURE sp_Move_Lobs;
+  
+  PROCEDURE sp_Unusable_Indexes(p_owner VARCHAR2, p_index_status VARCHAR2);
+      
+END pkg_Segment_Space_Cleanup ;
+/
+
+CREATE OR REPLACE PACKAGE BODY SCBDBA.pkg_Segment_Space_Cleanup 
+ AS
+ 
+/******************************************************************************
+   NAME:       pkg_Segment_Space_Cleanup
+   PURPOSE:
+
+   REVISIONS:
+   Ver        Date        Author           Description
+   ---------  ----------  ---------------  ------------------------------------
+   1.0        9/03/2020    KVISHWAN      1. Created this package.
+******************************************************************************/
+  PROCEDURE sp_Populate_Stg_Tbl  (p_Block_Size NUMBER, 
+									p_File_Id NUMBER,
+									p_Resize_Size NUMBER)
+   IS
+   
+   CURSOR c_Tables
+   IS
+     SELECT DISTINCT OWNER,SEGMENT_NAME,SEGMENT_TYPE
+          FROM DBA_EXTENTS
+          WHERE (block_id + blocks-1)*p_Block_Size > p_Resize_Size  
+          AND FILE_ID = p_File_Id
+          AND SEGMENT_TYPE NOT LIKE '%PARTITION%'
+          ORDER BY 1;  
+    l_err_msg 		VARCHAR2(4000);
+     
+  BEGIN
+     dbms_streams.set_tag('ff');
+	 
+	 EXECUTE IMMEDIATE 'TRUNCATE TABLE MOVE_SEGMENTS_STG';
+	 EXECUTE IMMEDIATE 'TRUNCATE TABLE MOVE_SEG_SPACE_ERR';
+	 --EXECUTE IMMEDIATE 'TRUNCATE TABLE PROC_START_END_TBL';
+	 
+	 for v_Tables in c_Tables
+	 LOOP
+	 INSERT INTO MOVE_SEGMENTS_STG
+	   (OWNER, 
+		SEGMENT_NAME, 
+		SEGMENT_TYPE,
+		STATUS,
+		CREATED_DATE
+		)
+	 VALUES (v_Tables.OWNER, 
+		     v_Tables.SEGMENT_NAME, 
+			 v_Tables.SEGMENT_TYPE,
+			 'P',
+			SYSDATE
+			);
+	 end LOOP;
+	 COMMIT;
+	 EXCEPTION
+     WHEN OTHERS THEN
+	 ROLLBACK;
+	 l_err_msg := SUBSTR(SQLERRM, 1, 250);
+     INSERT INTO MOVE_SEG_SPACE_ERR 
+	 (PROC_NAME,
+	  ERR_MSG
+	  )
+	  VALUES 
+	  ('pkg_Segment_Space_Cleanup.sp_Populate_Stg_Tbl',
+	   l_err_msg
+	   );
+	   COMMIT;
+	dbms_streams.set_tag(null);   
+   END sp_Populate_Stg_Tbl;
+   
+   PROCEDURE sp_Stmt_Generate (p_tbl_tblspace VARCHAR2, p_indx_tblspace VARCHAR2,p_lob_tblspace VARCHAR2) 
+   IS
+   BEGIN
+   
+		dbms_streams.set_tag('ff');
+		
+		UPDATE MOVE_SEGMENTS_STG
+		SET stmt = 'alter table '||owner||'.'||segment_name||' move tablespace '||p_tbl_tblspace
+		WHERE segment_type='TABLE';
+        
+		UPDATE MOVE_SEGMENTS_STG
+		SET stmt = 'alter index '||owner||'.'||segment_name||' rebuild online tablespace '||p_indx_tblspace
+		WHERE segment_type='INDEX'
+		AND segment_name not like '%IOT%';
+		
+		UPDATE MOVE_SEGMENTS_STG
+		SET stmt = (select 'alter table '||owner||'.'||table_name||' move tablespace '||p_tbl_tblspace
+		            from dba_indexes 
+					where index_name = MOVE_SEGMENTS_STG.segment_name
+					and index_name like '%IOT%'
+					)
+		WHERE segment_type='INDEX'
+		AND segment_name like '%IOT%';
+		
+		UPDATE MOVE_SEGMENTS_STG
+		SET stmt = (select 'alter table '||owner||'.'||table_name||' move lob('||column_name||') store as (tablespace '||p_lob_tblspace||') PARALLEL 4' 
+					from dba_lobs 
+					where segment_name = MOVE_SEGMENTS_STG.segment_name 
+					and segment_type = MOVE_SEGMENTS_STG.segment_type
+					and segment_type='LOBSEGMENT'
+					)
+		WHERE segment_type='LOBSEGMENT'	  
+		AND status = 'P'
+		AND stmt is null;
+					
+        UPDATE 	MOVE_SEGMENTS_STG
+		SET status = 'N' -- Not required as LOB SEGMENT will take care of it
+		WHERE segment_name in (select index_name from dba_lobs 
+			   where segment_name in (select segment_name from MOVE_SEGMENTS_STG where segment_type='LOBSEGMENT')
+			   and index_name in (select segment_name from MOVE_SEGMENTS_STG where segment_type='LOBINDEX')
+			  )
+		AND segment_type='LOBINDEX'	  
+		AND status = 'P'
+		AND stmt is null;
+			  
+        UPDATE 	MOVE_SEGMENTS_STG
+		SET stmt = (select 'alter table '||owner||'.'||table_name||' move lob('||column_name||') store as (tablespace '||p_lob_tblspace||') PARALLEL 4' 
+					from dba_lobs 
+					where index_name = MOVE_SEGMENTS_STG.segment_name 
+					and MOVE_SEGMENTS_STG.segment_type='LOBINDEX'
+					)
+		WHERE segment_type='LOBINDEX'
+		AND status = 'P'
+		AND stmt is null;
+		
+		
+		
+		COMMIT;		
+		
+		dbms_streams.set_tag(null);
+					
+	END sp_Stmt_Generate;
+
+	PROCEDURE sp_Row_Enable
+	IS
+	
+	CURSOR C_TABLES IS
+	SELECT * FROM MOVE_SEGMENTS_STG 
+	WHERE SEGMENT_TYPE='TABLE';
+	l_err_msg 		VARCHAR2(4000);
+	l_table_name    VARCHAR2(50);
+	BEGIN
+	
+	dbms_streams.set_tag('ff');
+	
+	FOR V_TABLES IN C_TABLES
+	LOOP
+		EXECUTE IMMEDIATE 'ALTER TABLE '||V_TABLES.OWNER||'.'||V_TABLES.SEGMENT_NAME||' ENABLE ROW MOVEMENT';
+		l_table_name := V_TABLES.SEGMENT_NAME;
+	END LOOP;
+	EXCEPTION
+			WHEN OTHERS THEN
+			l_err_msg := SUBSTR(SQLERRM, 1, 250);
+			INSERT INTO MOVE_SEG_SPACE_ERR 
+			(PROC_NAME,
+			 ERR_MSG
+			)
+			VALUES 
+			('pkg_Segment_Space_Cleanup.sp_Row_Enable-'||l_table_name,
+			l_err_msg
+			);
+		  COMMIT;
+	
+	dbms_streams.set_tag(null);
+	
+	END sp_Row_Enable;
+	
+	PROCEDURE sp_Row_Disable
+	IS
+	
+	CURSOR C_TABLES IS
+	SELECT * FROM MOVE_SEGMENTS_STG 
+	WHERE SEGMENT_TYPE='TABLE';
+	l_err_msg 		VARCHAR2(4000);
+	l_table_name    VARCHAR2(50);
+	BEGIN
+	
+	dbms_streams.set_tag('ff');
+	
+	FOR V_TABLES IN C_TABLES
+	LOOP
+		EXECUTE IMMEDIATE 'ALTER TABLE '||V_TABLES.OWNER||'.'||V_TABLES.SEGMENT_NAME||' DISABLE ROW MOVEMENT';
+		l_table_name := V_TABLES.SEGMENT_NAME;
+	END LOOP;
+	
+	EXCEPTION
+			WHEN OTHERS THEN
+			l_err_msg := SUBSTR(SQLERRM, 1, 250);
+			INSERT INTO MOVE_SEG_SPACE_ERR 
+			(PROC_NAME,
+			 ERR_MSG
+			)
+			VALUES 
+			('pkg_Segment_Space_Cleanup.sp_Row_Disable-'||l_table_name,
+			l_err_msg
+			);
+		  COMMIT;
+	
+	dbms_streams.set_tag(null);
+	
+	END sp_Row_Disable;
+	
+	PROCEDURE sp_Move_Tbl(p_index_tblspace VARCHAR2,p_index_status VARCHAR2)
+	IS
+	
+	CURSOR C_TABLES IS
+	SELECT * FROM MOVE_SEGMENTS_STG 
+	WHERE SEGMENT_TYPE='TABLE'
+	AND STATUS IN ('C','P','E')
+	AND NVL(INDX_STATUS,'P') <> 'C';
+	l_err_msg 		VARCHAR2(4000);
+	l_table_name    VARCHAR2(50);
+	l_index_name    VARCHAR2(50);
+	BEGIN
+	
+	dbms_streams.set_tag('ff');
+	
+	FOR V_TABLES IN C_TABLES
+	LOOP
+    BEGIN		
+		l_table_name := V_TABLES.SEGMENT_NAME;
+		
+		IF V_TABLES.STATUS IN ('P','E')
+		THEN 
+		    EXECUTE IMMEDIATE V_TABLES.STMT;
+			
+			UPDATE MOVE_SEGMENTS_STG
+			SET STATUS = 'C'
+			WHERE SEGMENT_NAME = l_table_name
+			AND SEGMENT_TYPE='TABLE';
+			
+		END IF;
+				
+		FOR V_INDEXES IN (SELECT OWNER,INDEX_NAME
+						  FROM DBA_INDEXES
+						  WHERE TABLE_NAME = V_TABLES.SEGMENT_NAME
+						  AND   OWNER = V_TABLES.OWNER
+						  AND STATUS = p_index_status
+						  )
+        LOOP 
+			
+			EXECUTE IMMEDIATE 'ALTER INDEX '||V_INDEXES.OWNER||'.'||V_INDEXES.INDEX_NAME||' REBUILD ONLINE TABLESPACE '||p_index_tblspace;
+			l_index_name := V_INDEXES.INDEX_NAME;
+			
+			UPDATE MOVE_SEGMENTS_STG
+			SET STATUS = 'C'
+			WHERE SEGMENT_TYPE='INDEX'
+			AND SEGMENT_NAME=l_index_name;
+		    	
+		END LOOP;
+		
+		UPDATE MOVE_SEGMENTS_STG
+		SET INDX_STATUS = 'C'
+		WHERE SEGMENT_NAME = l_table_name
+		AND SEGMENT_TYPE='TABLE';
+		
+		EXCEPTION
+			WHEN OTHERS THEN
+			l_err_msg := SUBSTR(SQLERRM, 1, 250);
+			INSERT INTO MOVE_SEG_SPACE_ERR 
+			(PROC_NAME,
+			 ERR_MSG
+			)
+			VALUES 
+			('pkg_Segment_Space_Cleanup.sp_Move_Tbl-'||l_table_name||'-'||l_index_name,
+			l_err_msg
+			);
+			UPDATE MOVE_SEGMENTS_STG
+			SET INDX_STATUS = 'E'
+			WHERE SEGMENT_NAME = l_table_name
+			AND SEGMENT_TYPE='TABLE';
+		    COMMIT;
+			CONTINUE;
+		END;
+	
+		
+	END LOOP;
+	
+	EXCEPTION
+			WHEN OTHERS THEN
+			l_err_msg := SUBSTR(SQLERRM, 1, 250);
+			INSERT INTO MOVE_SEG_SPACE_ERR 
+			(PROC_NAME,
+			 ERR_MSG
+			)
+			VALUES 
+			('pkg_Segment_Space_Cleanup.sp_Move_Tbl-'||l_table_name,
+			l_err_msg
+			);
+			UPDATE MOVE_SEGMENTS_STG
+			SET STATUS = 'E',
+			    ERR_MSG=l_err_msg
+			WHERE SEGMENT_NAME = l_table_name
+			AND SEGMENT_TYPE='TABLE';
+		    COMMIT;
+	
+	dbms_streams.set_tag(null);
+	
+	END sp_Move_Tbl;
+	
+	PROCEDURE sp_Rebuild_Indexes
+	IS
+	
+	CURSOR C_INDEXES IS
+	SELECT * FROM MOVE_SEGMENTS_STG 
+	WHERE SEGMENT_TYPE='INDEX'
+	AND STATUS IN  ('P','E');
+	l_err_msg 		VARCHAR2(4000);
+	l_index_name    VARCHAR2(50);
+	BEGIN
+	FOR V_INDEXES IN C_INDEXES
+	LOOP
+    BEGIN
+	
+		dbms_streams.set_tag('ff');
+		
+		 l_index_name :=  V_INDEXES.SEGMENT_NAME;
+		 
+		 EXECUTE IMMEDIATE V_INDEXES.STMT;
+		 
+		 UPDATE MOVE_SEGMENTS_STG
+		 SET STATUS = 'C'
+		 WHERE SEGMENT_NAME = V_INDEXES.SEGMENT_NAME;
+		 
+		 EXCEPTION
+			WHEN OTHERS THEN
+			l_err_msg := SUBSTR(SQLERRM, 1, 250);
+			INSERT INTO MOVE_SEG_SPACE_ERR 
+			(PROC_NAME,
+			 ERR_MSG
+			)
+			VALUES 
+			('pkg_Segment_Space_Cleanup.sp_Rebuild_Indexes-'||l_index_name,
+			l_err_msg
+			);
+			UPDATE MOVE_SEGMENTS_STG
+			SET STATUS = 'E',
+				ERR_MSG = l_err_msg
+			WHERE SEGMENT_NAME = l_index_name
+			AND SEGMENT_TYPE='INDEX';
+		    COMMIT;
+			CONTINUE;
+		END;
+		
+	END LOOP;
+	COMMIT;
+	
+	dbms_streams.set_tag(null);
+	
+	END sp_Rebuild_Indexes;
+	
+	PROCEDURE sp_Move_Lobs
+	IS
+	
+	CURSOR C_LOBS IS
+	SELECT * FROM MOVE_SEGMENTS_STG 
+	WHERE SEGMENT_TYPE IN ('LOBSEGMENT','LOBINDEX')
+	AND STATUS IN  ('P','E');
+	l_err_msg 		VARCHAR2(4000);
+	l_lob_name    VARCHAR2(50);
+	BEGIN
+	
+	dbms_streams.set_tag('ff');
+	
+	FOR V_LOBS IN C_LOBS
+	LOOP
+    BEGIN
+	     
+		 l_lob_name :=  V_LOBS.SEGMENT_NAME;
+		 
+		 EXECUTE IMMEDIATE V_LOBS.STMT;
+		 
+		 UPDATE MOVE_SEGMENTS_STG
+		 SET STATUS = 'C'
+		 WHERE SEGMENT_NAME = V_LOBS.SEGMENT_NAME
+		 AND SEGMENT_TYPE IN ('LOBSEGMENT','LOBINDEX')
+		 AND STATUS IN  ('P','E');
+		 
+		 EXCEPTION
+			WHEN OTHERS THEN
+			l_err_msg := SUBSTR(SQLERRM, 1, 250);
+			INSERT INTO MOVE_SEG_SPACE_ERR 
+			(PROC_NAME,
+			 ERR_MSG
+			)
+			VALUES 
+			('pkg_Segment_Space_Cleanup.sp_Move_Lobs-'||l_lob_name,
+			l_err_msg
+			);
+			UPDATE MOVE_SEGMENTS_STG
+			SET STATUS = 'E',
+				ERR_MSG = l_err_msg
+			WHERE SEGMENT_NAME = l_lob_name
+			AND SEGMENT_TYPE IN ('LOBSEGMENT','LOBINDEX');
+		    COMMIT;
+			CONTINUE;
+		END;
+		COMMIT;
+	END LOOP;
+	
+	dbms_streams.set_tag(null);
+	
+	END sp_Move_Lobs;
+	
+	PROCEDURE sp_Unusable_Indexes(p_owner VARCHAR2, p_index_status VARCHAR2)
+	IS
+	
+	CURSOR C_INDEXES IS
+	SELECT OWNER,INDEX_NAME
+	FROM DBA_INDEXES
+	WHERE OWNER = p_owner
+	AND STATUS = p_index_status;
+	l_index_name     VARCHAR2(50);
+	l_err_msg        VARCHAR2(250);
+	BEGIN
+	FOR V_INDEXES IN C_INDEXES
+	LOOP
+	BEGIN   
+		
+		dbms_streams.set_tag('ff');
+		
+		l_index_name := V_INDEXES.INDEX_NAME;
+		EXECUTE IMMEDIATE 'ALTER INDEX '||V_INDEXES.OWNER||'.'||V_INDEXES.INDEX_NAME||' REBUILD';
+        
+		EXCEPTION
+			WHEN OTHERS THEN
+			l_err_msg := SUBSTR(SQLERRM, 1, 250);
+			INSERT INTO MOVE_SEG_SPACE_ERR 
+			(PROC_NAME,
+			 ERR_MSG
+			)
+			VALUES 
+			('pkg_Segment_Space_Cleanup.sp_Unusable_Indexes-'||l_index_name,
+			l_err_msg
+			);
+		    COMMIT;
+			CONTINUE;
+		END;
+		
+		dbms_streams.set_tag(null);
+		
+	END LOOP;
+	
+	END sp_Unusable_Indexes;
+	
+END pkg_Segment_Space_Cleanup;
+/
+CREATE OR REPLACE PROCEDURE scbdba.sp_Cleandata_log (ProcName IN varchar2,
+													 p_owner VARCHAR2,
+													 p_blk_size NUMBER,
+													 p_file_id NUMBER, 
+													 p_Resize_Size NUMBER,
+													 p_tbl_tblspace VARCHAR2,
+													 p_indx_tblspace VARCHAR2,
+													 p_lob_tblspace  VARCHAR2,
+													 p_unusable  VARCHAR2
+													 )
+IS
+
+Id Number;
+StartTime TIMESTAMP;
+EndTime TIMESTAMP;
+
+BEGIN
+
+    CASE ProcName
+	WHEN 'sp_Populate_Stg_Tbl'
+	THEN
+		StartTime:= systimestamp;
+
+
+		INSERT INTO PROC_START_END_TBL (RUN_ID,PROC_NAME, START_TIME)
+		VALUES (RUN_ID_SEQ.nextval,ProcName, StartTime)
+		RETURNING RUN_ID INTO Id;
+		COMMIT;
+
+		pkg_Segment_Space_Cleanup.sp_Populate_Stg_Tbl(p_blk_size,p_file_id,p_Resize_Size);
+				
+		UPDATE PROC_START_END_TBL
+		SET END_TIME=systimestamp
+		WHERE RUN_ID=Id;  
+		COMMIT;        
+	WHEN 'sp_Stmt_Generate'
+	THEN
+		StartTime:= systimestamp;
+
+		INSERT INTO PROC_START_END_TBL (RUN_ID,PROC_NAME, START_TIME)
+		VALUES (RUN_ID_SEQ.nextval,ProcName, StartTime)
+		RETURNING RUN_ID INTO Id;
+		COMMIT;
+
+        pkg_Segment_Space_Cleanup.sp_Stmt_Generate(p_tbl_tblspace,p_indx_tblspace,p_lob_tblspace);
+		
+		UPDATE PROC_START_END_TBL
+		SET END_TIME=systimestamp
+		WHERE RUN_ID=Id;  
+		COMMIT; 
+	WHEN 'sp_Row_Enable'
+	THEN
+		StartTime:= systimestamp;
+
+		INSERT INTO PROC_START_END_TBL (RUN_ID,PROC_NAME, START_TIME)
+		VALUES (RUN_ID_SEQ.nextval,ProcName, StartTime)
+		RETURNING RUN_ID INTO Id;
+		COMMIT;
+
+		pkg_Segment_Space_Cleanup.sp_Row_Enable;
+		
+		UPDATE PROC_START_END_TBL
+		SET END_TIME=systimestamp
+		WHERE RUN_ID=Id;  
+		COMMIT; 
+	WHEN 'sp_Move_Tbl'
+	THEN
+		StartTime:= systimestamp;
+
+		INSERT INTO PROC_START_END_TBL (RUN_ID,PROC_NAME, START_TIME)
+		VALUES (RUN_ID_SEQ.nextval,ProcName, StartTime)
+		RETURNING RUN_ID INTO Id;
+		COMMIT;
+
+		pkg_Segment_Space_Cleanup.sp_Move_Tbl(p_indx_tblspace,p_unusable);
+		
+		UPDATE PROC_START_END_TBL
+		SET END_TIME=systimestamp
+		WHERE RUN_ID=Id;  
+		COMMIT; 
+	WHEN 'sp_Rebuild_Indexes'
+	THEN
+		StartTime:= systimestamp;
+
+		INSERT INTO PROC_START_END_TBL (RUN_ID,PROC_NAME, START_TIME)
+		VALUES (RUN_ID_SEQ.nextval,ProcName, StartTime)
+		RETURNING RUN_ID INTO Id;
+		COMMIT;
+
+		pkg_Segment_Space_Cleanup.sp_Rebuild_Indexes;
+		
+		UPDATE PROC_START_END_TBL
+		SET END_TIME=systimestamp
+		WHERE RUN_ID=Id;  
+		COMMIT; 
+	WHEN 'sp_Row_Disable'
+	THEN
+		StartTime:= systimestamp;
+
+		INSERT INTO PROC_START_END_TBL (RUN_ID,PROC_NAME, START_TIME)
+		VALUES (RUN_ID_SEQ.nextval,ProcName, StartTime)
+		RETURNING RUN_ID INTO Id;
+		COMMIT;
+
+		pkg_Segment_Space_Cleanup.sp_Row_Disable;
+		
+		UPDATE PROC_START_END_TBL
+		SET END_TIME=systimestamp
+		WHERE RUN_ID=Id;  
+		COMMIT; 
+	WHEN 'sp_Move_Lobs'
+	THEN
+		StartTime:= systimestamp;
+
+		INSERT INTO PROC_START_END_TBL (RUN_ID,PROC_NAME, START_TIME)
+		VALUES (RUN_ID_SEQ.nextval,ProcName, StartTime)
+		RETURNING RUN_ID INTO Id;
+		COMMIT;
+
+		pkg_Segment_Space_Cleanup.sp_Move_Lobs;
+		
+		UPDATE PROC_START_END_TBL
+		SET END_TIME=systimestamp
+		WHERE RUN_ID=Id;  
+		COMMIT; 
+	WHEN 'sp_Unusable_Indexes'
+	THEN
+		StartTime:= systimestamp;
+
+		INSERT INTO PROC_START_END_TBL (RUN_ID,PROC_NAME, START_TIME)
+		VALUES (RUN_ID_SEQ.nextval,ProcName, StartTime)
+		RETURNING RUN_ID INTO Id;
+		COMMIT;
+
+		pkg_Segment_Space_Cleanup.sp_Unusable_Indexes(p_owner,p_unusable);
+		
+		UPDATE PROC_START_END_TBL
+		SET END_TIME=systimestamp
+		WHERE RUN_ID=Id;  
+		COMMIT; 
+	END CASE;
+END;
+/
+
+CREATE OR REPLACE PROCEDURE scbdba.sp_Cleandata_log (ProcName IN varchar2,
+													 p_owner VARCHAR2,
+													 p_blk_size NUMBER,
+													 p_file_id NUMBER, 
+													 p_Resize_Size NUMBER,
+													 p_tbl_tblspace VARCHAR2,
+													 p_indx_tblspace VARCHAR2,
+													 p_lob_tblspace  VARCHAR2,
+													 p_unusable  VARCHAR2
+													 )
+IS
+
+Id Number;
+StartTime TIMESTAMP;
+EndTime TIMESTAMP;
+
+BEGIN
+
+    CASE ProcName
+	WHEN 'sp_Populate_Stg_Tbl'
+	THEN
+		StartTime:= systimestamp;
+
+
+		INSERT INTO PROC_START_END_TBL (RUN_ID,PROC_NAME, START_TIME)
+		VALUES (RUN_ID_SEQ.nextval,ProcName, StartTime)
+		RETURNING RUN_ID INTO Id;
+		COMMIT;
+
+		pkg_Segment_Space_Cleanup.sp_Populate_Stg_Tbl(p_blk_size,p_file_id,p_Resize_Size);
+				
+		UPDATE PROC_START_END_TBL
+		SET END_TIME=systimestamp
+		WHERE RUN_ID=Id;  
+		COMMIT;        
+	WHEN 'sp_Stmt_Generate'
+	THEN
+		StartTime:= systimestamp;
+
+		INSERT INTO PROC_START_END_TBL (RUN_ID,PROC_NAME, START_TIME)
+		VALUES (RUN_ID_SEQ.nextval,ProcName, StartTime)
+		RETURNING RUN_ID INTO Id;
+		COMMIT;
+
+        pkg_Segment_Space_Cleanup.sp_Stmt_Generate(p_tbl_tblspace,p_indx_tblspace,p_lob_tblspace);
+		
+		UPDATE PROC_START_END_TBL
+		SET END_TIME=systimestamp
+		WHERE RUN_ID=Id;  
+		COMMIT; 
+	WHEN 'sp_Row_Enable'
+	THEN
+		StartTime:= systimestamp;
+
+		INSERT INTO PROC_START_END_TBL (RUN_ID,PROC_NAME, START_TIME)
+		VALUES (RUN_ID_SEQ.nextval,ProcName, StartTime)
+		RETURNING RUN_ID INTO Id;
+		COMMIT;
+
+		pkg_Segment_Space_Cleanup.sp_Row_Enable;
+		
+		UPDATE PROC_START_END_TBL
+		SET END_TIME=systimestamp
+		WHERE RUN_ID=Id;  
+		COMMIT; 
+	WHEN 'sp_Move_Tbl'
+	THEN
+		StartTime:= systimestamp;
+
+		INSERT INTO PROC_START_END_TBL (RUN_ID,PROC_NAME, START_TIME)
+		VALUES (RUN_ID_SEQ.nextval,ProcName, StartTime)
+		RETURNING RUN_ID INTO Id;
+		COMMIT;
+
+		pkg_Segment_Space_Cleanup.sp_Move_Tbl(p_indx_tblspace,p_unusable);
+		
+		UPDATE PROC_START_END_TBL
+		SET END_TIME=systimestamp
+		WHERE RUN_ID=Id;  
+		COMMIT; 
+	WHEN 'sp_Rebuild_Indexes'
+	THEN
+		StartTime:= systimestamp;
+
+		INSERT INTO PROC_START_END_TBL (RUN_ID,PROC_NAME, START_TIME)
+		VALUES (RUN_ID_SEQ.nextval,ProcName, StartTime)
+		RETURNING RUN_ID INTO Id;
+		COMMIT;
+
+		pkg_Segment_Space_Cleanup.sp_Rebuild_Indexes;
+		
+		UPDATE PROC_START_END_TBL
+		SET END_TIME=systimestamp
+		WHERE RUN_ID=Id;  
+		COMMIT; 
+	WHEN 'sp_Row_Disable'
+	THEN
+		StartTime:= systimestamp;
+
+		INSERT INTO PROC_START_END_TBL (RUN_ID,PROC_NAME, START_TIME)
+		VALUES (RUN_ID_SEQ.nextval,ProcName, StartTime)
+		RETURNING RUN_ID INTO Id;
+		COMMIT;
+
+		pkg_Segment_Space_Cleanup.sp_Row_Disable;
+		
+		UPDATE PROC_START_END_TBL
+		SET END_TIME=systimestamp
+		WHERE RUN_ID=Id;  
+		COMMIT; 
+	WHEN 'sp_Move_Lobs'
+	THEN
+		StartTime:= systimestamp;
+
+		INSERT INTO PROC_START_END_TBL (RUN_ID,PROC_NAME, START_TIME)
+		VALUES (RUN_ID_SEQ.nextval,ProcName, StartTime)
+		RETURNING RUN_ID INTO Id;
+		COMMIT;
+
+		pkg_Segment_Space_Cleanup.sp_Move_Lobs;
+		
+		UPDATE PROC_START_END_TBL
+		SET END_TIME=systimestamp
+		WHERE RUN_ID=Id;  
+		COMMIT; 
+	WHEN 'sp_Unusable_Indexes'
+	THEN
+		StartTime:= systimestamp;
+
+		INSERT INTO PROC_START_END_TBL (RUN_ID,PROC_NAME, START_TIME)
+		VALUES (RUN_ID_SEQ.nextval,ProcName, StartTime)
+		RETURNING RUN_ID INTO Id;
+		COMMIT;
+
+		pkg_Segment_Space_Cleanup.sp_Unusable_Indexes(p_owner,p_unusable);
+		
+		UPDATE PROC_START_END_TBL
+		SET END_TIME=systimestamp
+		WHERE RUN_ID=Id;  
+		COMMIT; 
+	END CASE;
+END;
+/
+
+/**********************************Sample call to the procedure************************/
+
+begin
+   scbdba.sp_Cleandata_log ('sp_Populate_Stg_Tbl','SCHEMANAME','8192','4','0','SCHEMANAME_DATA','SCHEMANAME_INDX','SCHEMANAME_LOB','UNUSABLE');
+   scbdba.sp_Cleandata_log ('sp_Stmt_Generate','SCHEMANAME','8192','4','0','SCHEMANAME_DATA','SCHEMANAME_INDX','SCHEMANAME_LOB','UNUSABLE');
+   scbdba.sp_Cleandata_log ('sp_Row_Enable','SCHEMANAME','8192','4','0','SCHEMANAME_DATA','SCHEMANAME_INDX','SCHEMANAME_LOB','UNUSABLE');
+   scbdba.sp_Cleandata_log ('sp_Move_Tbl','SCHEMANAME','8192','4','0','SCHEMANAME_DATA','SCHEMANAME_INDX','SCHEMANAME_LOB','UNUSABLE');
+   scbdba.sp_Cleandata_log ('sp_Row_Disable','SCHEMANAME','8192','4','0','SCHEMANAME_DATA','SCHEMANAME_INDX','SCHEMANAME_LOB','UNUSABLE');
+   scbdba.sp_Cleandata_log ('sp_Move_Lobs','SCHEMANAME','8192','4','0','SCHEMANAME_DATA','SCHEMANAME_INDX','SCHEMANAME_LOB','UNUSABLE');
+   scbdba.sp_Cleandata_log ('sp_Move_Lobs','SCHEMANAME','8192','4','0','SCHEMANAME_DATA','SCHEMANAME_INDX','SCHEMANAME_LOB','UNUSABLE');
+end;
+/
