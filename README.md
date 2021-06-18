@@ -1,7 +1,7 @@
 # Code-Snippet---Segment-Space-Management
 Segment Space Management
 
-The package pkg_Segment_Space_Cleanup is created to perform Segment Space management on all types of Tablespaces within the Oracle Database.
+The package pkg_Segment_Space_Cleanup is created to perform Segment Space management on all types of Tablespaces including the database objects within the Oracle Database.
 
 **Pre-requisite:** The requirement is to create a DBA user with the database and it should have the DBA role provided (SCBDBA as mentioned in the snippet)
 
@@ -32,13 +32,13 @@ The below procedures within the package are to perform various tasks that are re
 **Procedure:**  The procedure sp_Cleandata_log is to call the package and pass the arguments to perform various steps. The sample call for the procedure is as below:
 
 begin
-   scbdba.sp_Cleandata_log ('sp_Populate_Stg_Tbl','SCHEMANAME','8192','4','0','SCHEMANAME_DATA','SCHEMANAME_INDX','SCHEMANAME_LOB','UNUSABLE');
-   scbdba.sp_Cleandata_log ('sp_Stmt_Generate','SCHEMANAME','8192','4','0','SCHEMANAME_DATA','SCHEMANAME_INDX','SCHEMANAME_LOB','UNUSABLE');
-   scbdba.sp_Cleandata_log ('sp_Row_Enable','SCHEMANAME','8192','4','0','SCHEMANAME_DATA','SCHEMANAME_INDX','SCHEMANAME_LOB','UNUSABLE');
-   scbdba.sp_Cleandata_log ('sp_Move_Tbl','SCHEMANAME','8192','4','0','SCHEMANAME_DATA','SCHEMANAME_INDX','SCHEMANAME_LOB','UNUSABLE');
-   scbdba.sp_Cleandata_log ('sp_Row_Disable','SCHEMANAME','8192','4','0','SCHEMANAME_DATA','SCHEMANAME_INDX','SCHEMANAME_LOB','UNUSABLE');
-   scbdba.sp_Cleandata_log ('sp_Move_Lobs','SCHEMANAME','8192','4','0','SCHEMANAME_DATA','SCHEMANAME_INDX','SCHEMANAME_LOB','UNUSABLE');
-   scbdba.sp_Cleandata_log ('sp_Move_Lobs','SCHEMANAME','8192','4','0','SCHEMANAME_DATA','SCHEMANAME_INDX','SCHEMANAME_LOB','UNUSABLE');
+   scbdba.sp_Cleandata_log ('sp_Populate_Stg_Tbl','SCHEMANAME','8192','4','1073741824','SCHEMANAME_DATA','SCHEMANAME_INDX','SCHEMANAME_LOB','UNUSABLE');
+   scbdba.sp_Cleandata_log ('sp_Stmt_Generate','SCHEMANAME','8192','4','1073741824','SCHEMANAME_DATA','SCHEMANAME_INDX','SCHEMANAME_LOB','UNUSABLE');
+   scbdba.sp_Cleandata_log ('sp_Row_Enable','SCHEMANAME','8192','4','1073741824','SCHEMANAME_DATA','SCHEMANAME_INDX','SCHEMANAME_LOB','UNUSABLE');
+   scbdba.sp_Cleandata_log ('sp_Move_Tbl','SCHEMANAME','8192','4','1073741824','SCHEMANAME_DATA','SCHEMANAME_INDX','SCHEMANAME_LOB','UNUSABLE');
+   scbdba.sp_Cleandata_log ('sp_Row_Disable','SCHEMANAME','8192','4','1073741824','SCHEMANAME_DATA','SCHEMANAME_INDX','SCHEMANAME_LOB','UNUSABLE');
+   scbdba.sp_Cleandata_log ('sp_Move_Lobs','SCHEMANAME','8192','4','1073741824','SCHEMANAME_DATA','SCHEMANAME_INDX','SCHEMANAME_LOB','UNUSABLE');
+   scbdba.sp_Cleandata_log ('sp_Move_Lobs','SCHEMANAME','8192','4','1073741824','SCHEMANAME_DATA','SCHEMANAME_INDX','SCHEMANAME_LOB','UNUSABLE');
 end;
 /
               
